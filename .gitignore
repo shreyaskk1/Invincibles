@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+qa360-junit.xml
+qa360-test-exit-code.txt
+changed_files.json
+qa360_commits.json
+*.pyc
+

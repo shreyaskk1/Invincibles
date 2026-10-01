@@ -1,0 +1,20 @@
+project_key: invincibles-new-project
+name: Invincibles
+client: Centric Hackathon
+portfolio: QA Practice
+industry: consulting
+criticality: Tier 1
+release_train: QA360-DEMO
+owner: invincibles.team@centricconsulting.com
+qa_lead: invincibles.qa@centricconsulting.com
+repo_url: https://github.com/<your-user-or-org>/<your-new-repo>.git
+tools:
+  repo: GitHub
+  ci: GitHub Actions
+  ui: Pytest
+  api: Python Requests
+  data: SQL Server
+  security: GitHub Advanced Security
+  performance: k6-ready
+  defect: GitHub Issues
+

@@ -1,0 +1,345 @@
+name: QA360 Publish Telemetry
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  publish-qa360:
+    runs-on: ubuntu-latest
+    env:
+      QA360_BASE_URL: ${{ secrets.QA360_BASE_URL }}
+      QA360_API_TOKEN: ${{ secrets.QA360_API_TOKEN }}
+      QA360_PROJECT_KEY: ${{ vars.QA360_PROJECT_KEY || 'invincibles-new-project' }}
+      QA360_PROJECT_NAME: ${{ vars.QA360_PROJECT_NAME || 'Invincibles' }}
+      QA360_CLIENT: ${{ vars.QA360_CLIENT || 'Centric Hackathon' }}
+      QA360_PORTFOLIO: ${{ vars.QA360_PORTFOLIO || 'QA Practice' }}
+      QA360_INDUSTRY: ${{ vars.QA360_INDUSTRY || 'consulting' }}
+      QA360_CRITICALITY: ${{ vars.QA360_CRITICALITY || 'Tier 1' }}
+      QA360_RELEASE_TRAIN: ${{ vars.QA360_RELEASE_TRAIN || 'QA360-DEMO' }}
+      QA360_OWNER: ${{ vars.QA360_OWNER || 'Invincibles Team' }}
+      QA360_QA_LEAD: ${{ vars.QA360_QA_LEAD || 'Invincibles QA' }}
+      QA360_REPO_TOOL: ${{ vars.QA360_REPO_TOOL || 'GitHub' }}
+      QA360_CI_TOOL: ${{ vars.QA360_CI_TOOL || 'GitHub Actions' }}
+      QA360_UI_TOOL: ${{ vars.QA360_UI_TOOL || 'Pytest' }}
+      QA360_API_TOOL: ${{ vars.QA360_API_TOOL || 'Python Requests' }}
+      QA360_DATA_TOOL: ${{ vars.QA360_DATA_TOOL || 'SQL Server' }}
+      QA360_SECURITY_TOOL: ${{ vars.QA360_SECURITY_TOOL || 'GitHub Advanced Security' }}
+      QA360_PERFORMANCE_TOOL: ${{ vars.QA360_PERFORMANCE_TOOL || 'k6-ready' }}
+      QA360_DEFECT_TOOL: ${{ vars.QA360_DEFECT_TOOL || 'GitHub Issues' }}
+      QA360_COVERAGE: ${{ vars.QA360_COVERAGE }}
+      PYTHONPATH: src
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run automation tests and create JUnit report
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          else
+            python -m pip install pytest
+          fi
+          set +e
+          python -m pytest --junitxml qa360-junit.xml
+          echo $? > qa360-test-exit-code.txt
+          set -e
+
+      - name: Collect changed files and commit authors
+        shell: bash
+        env:
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_BEFORE: ${{ github.event.before }}
+          GH_SHA: ${{ github.sha }}
+          GH_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          def env(name, default=""):
+              return os.environ.get(name) or default
+
+          def git(args, default=""):
+              try:
+                  return subprocess.check_output(["git", *args], text=True).strip()
+              except subprocess.CalledProcessError:
+                  return default
+
+          def split_lines(value):
+              return [line.strip() for line in value.splitlines() if line.strip()]
+
+          event_name = env("GH_EVENT_NAME")
+          sha = env("GH_SHA")
+          before = env("GH_BEFORE")
+          base_sha = env("GH_PR_BASE_SHA")
+          head_sha = env("GH_PR_HEAD_SHA")
+
+          if event_name == "pull_request" and base_sha and head_sha:
+              changed_files = split_lines(git(["diff", "--name-only", base_sha, head_sha]))
+              commits = [head_sha]
+          elif before and before != "0000000000000000000000000000000000000000":
+              changed_files = split_lines(git(["diff", "--name-only", before, sha]))
+              commits = split_lines(git(["rev-list", "--reverse", f"{before}..{sha}"])) or [sha]
+          else:
+              changed_files = split_lines(git(["show", "--pretty=", "--name-only", sha]))
+              commits = [sha]
+
+          commit_payloads = []
+          for commit_sha in commits:
+              author_email = git(["show", "-s", "--format=%ae", commit_sha])
+              author_name = git(["show", "-s", "--format=%an", commit_sha])
+              commit_files = split_lines(
+                  git(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit_sha])
+              )
+              commit_payloads.append(
+                  {
+                      "commit_sha": commit_sha,
+                      "author_email": author_email,
+                      "author_name": author_name,
+                      "changed_files": commit_files or changed_files,
+                  }
+              )
+
+          with open("changed_files.json", "w", encoding="utf-8") as handle:
+              json.dump(changed_files, handle)
+          with open("qa360_commits.json", "w", encoding="utf-8") as handle:
+              json.dump(commit_payloads, handle)
+          PY
+
+      - name: Publish QA360 project, Git activity, PR/MR activity, and automation report
+        shell: bash
+        env:
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_HEAD_REF: ${{ github.head_ref }}
+          GH_BASE_REF: ${{ github.base_ref }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_ACTOR: ${{ github.actor }}
+          GH_EVENT_ACTION: ${{ github.event.action }}
+          GH_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_PR_STATE: ${{ github.event.pull_request.state }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          def env(name, default=""):
+              return os.environ.get(name) or default
+
+          def number(name, default):
+              raw = env(name)
+              if not raw:
+                  return default
+              try:
+                  return float(raw)
+              except ValueError:
+                  return default
+
+          def parse_junit(path):
+              tree = ET.parse(path)
+              root = tree.getroot()
+              suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
+              test_cases = []
+              for suite in suites:
+                  suite_name = suite.attrib.get("name", "default")
+                  for case in suite.findall("testcase"):
+                      status = "passed"
+                      failure_type = ""
+                      failure_message = ""
+                      failure = case.find("failure")
+                      error = case.find("error")
+                      skipped = case.find("skipped")
+                      if failure is not None:
+                          status = "failed"
+                          failure_type = failure.attrib.get("type", "failure")
+                          failure_message = failure.attrib.get("message") or (failure.text or "")
+                      elif error is not None:
+                          status = "error"
+                          failure_type = error.attrib.get("type", "error")
+                          failure_message = error.attrib.get("message") or (error.text or "")
+                      elif skipped is not None:
+                          status = "skipped"
+                          failure_type = skipped.attrib.get("type", "skipped")
+                          failure_message = skipped.attrib.get("message") or (skipped.text or "")
+                      test_cases.append(
+                          {
+                              "suite_name": suite_name,
+                              "class_name": case.attrib.get("classname", ""),
+                              "test_name": case.attrib.get("name", "unnamed_test"),
+                              "file_path": case.attrib.get("file", ""),
+                              "status": status,
+                              "duration_seconds": float(case.attrib.get("time", 0) or 0),
+                              "failure_type": failure_type,
+                              "failure_message": " ".join(failure_message.split())[:1000],
+                          }
+                      )
+              return test_cases
+
+          def post_json(path, payload):
+              base_url = env("QA360_BASE_URL").rstrip("/")
+              if not base_url:
+                  print("QA360_BASE_URL is not configured.", file=sys.stderr)
+                  sys.exit(1)
+              request = urllib.request.Request(
+                  f"{base_url}{path}",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {env('QA360_API_TOKEN')}",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  body = response.read().decode("utf-8")
+                  print(body)
+                  return json.loads(body)
+
+          repository = env("GH_REPOSITORY")
+          repo_url = f"{env('GH_SERVER_URL', 'https://github.com')}/{repository}"
+          project_key = env("QA360_PROJECT_KEY")
+          project_name = env("QA360_PROJECT_NAME", "Invincibles")
+          event_name = env("GH_EVENT_NAME")
+          is_pr = event_name == "pull_request"
+          branch = env("GH_HEAD_REF") if is_pr else env("GH_REF_NAME", "main")
+          target_branch = env("GH_BASE_REF", "main")
+          commit_sha = env("GH_SHA")
+          run_id = env("GH_RUN_ID", commit_sha[:8])
+          changed_files = json.load(open("changed_files.json", encoding="utf-8"))
+          commits = json.load(open("qa360_commits.json", encoding="utf-8"))
+          test_cases = parse_junit("qa360-junit.xml")
+
+          post_json(
+              "/api/v1/projects/register",
+              {
+                  "project_key": project_key,
+                  "name": project_name,
+                  "client": env("QA360_CLIENT", "Centric Hackathon"),
+                  "portfolio": env("QA360_PORTFOLIO", "QA Practice"),
+                  "industry": env("QA360_INDUSTRY", "consulting"),
+                  "criticality": env("QA360_CRITICALITY", "Tier 1"),
+                  "release_train": env("QA360_RELEASE_TRAIN", "QA360-DEMO"),
+                  "repo_url": repo_url,
+                  "owner": env("QA360_OWNER", "Invincibles Team"),
+                  "qa_lead": env("QA360_QA_LEAD", "Invincibles QA"),
+                  "service_tier": "Mission Critical",
+                  "onboarding_stage": "Telemetry Live",
+                  "tools": {
+                      "repo": env("QA360_REPO_TOOL", "GitHub"),
+                      "ci": env("QA360_CI_TOOL", "GitHub Actions"),
+                      "ui": env("QA360_UI_TOOL", "Pytest"),
+                      "api": env("QA360_API_TOOL", "Python Requests"),
+                      "data": env("QA360_DATA_TOOL", "SQL Server"),
+                      "security": env("QA360_SECURITY_TOOL", "GitHub Advanced Security"),
+                      "performance": env("QA360_PERFORMANCE_TOOL", "k6-ready"),
+                      "defect": env("QA360_DEFECT_TOOL", "GitHub Issues"),
+                  },
+              },
+          )
+
+          if not is_pr:
+              for commit in commits:
+                  commit_files = commit.get("changed_files") or changed_files
+                  linked_tests = sum(
+                      1 for item in commit_files if "test" in item.lower() or "spec" in item.lower()
+                  )
+                  author = commit.get("author_email") or f"{env('GH_ACTOR')}@users.noreply.github.com"
+                  post_json(
+                      "/api/v1/events",
+                      {
+                          "project_key": project_key,
+                          "event_type": "code_checkin",
+                          "source": "github-actions",
+                          "correlation_id": f"checkin-{commit.get('commit_sha')}",
+                          "payload": {
+                              "repo_url": repo_url,
+                              "branch": branch,
+                              "target_branch": target_branch,
+                              "commit_sha": commit.get("commit_sha", commit_sha),
+                              "author": author,
+                              "status": "Committed",
+                              "linked_tests": linked_tests,
+                              "linked_work_items": [f"QA360-{run_id}"],
+                              "changed_files": commit_files,
+                          },
+                      },
+                  )
+
+          if is_pr:
+              linked_tests = sum(
+                  1 for item in changed_files if "test" in item.lower() or "spec" in item.lower()
+              )
+              author = commits[0].get("author_email") if commits else f"{env('GH_ACTOR')}@users.noreply.github.com"
+              merge_request_id = f"PR-{env('GH_PR_NUMBER', run_id)}"
+              post_json(
+                  "/api/v1/events",
+                  {
+                      "project_key": project_key,
+                      "event_type": "merge_request",
+                      "source": "github-actions",
+                      "correlation_id": merge_request_id,
+                      "payload": {
+                          "repo_url": repo_url,
+                          "branch": branch,
+                          "target_branch": target_branch,
+                          "commit_sha": commit_sha,
+                          "merge_request_id": merge_request_id,
+                          "merge_request_title": env("GH_PR_TITLE", f"QA360 update for {project_name}"),
+                          "author": author,
+                          "status": env("GH_PR_STATE", env("GH_EVENT_ACTION", "Open")),
+                          "linked_tests": linked_tests,
+                          "linked_work_items": [f"QA360-{run_id}"],
+                          "changed_files": changed_files,
+                      },
+                  },
+              )
+
+          automation_payload = {
+              "run_id": f"run-{run_id}",
+              "tool": "pytest",
+              "report_format": "junit",
+              "release_name": branch or "main",
+              "branch": branch,
+              "commit_sha": commit_sha,
+              "test_cases": test_cases,
+              "code_churn": max(1, len(changed_files)),
+          }
+          coverage = number("QA360_COVERAGE", 0)
+          if coverage:
+              automation_payload["coverage_percent"] = coverage
+
+          post_json(
+              "/api/v1/events",
+              {
+                  "project_key": project_key,
+                  "event_type": "automation_report",
+                  "source": "github-actions",
+                  "correlation_id": f"run-{run_id}",
+                  "payload": automation_payload,
+              },
+          )
+          print(f"QA360 telemetry published for {project_key}.")
+          PY
+          exit "$(cat qa360-test-exit-code.txt)"
+
